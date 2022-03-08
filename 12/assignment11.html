@@ -1,0 +1,784 @@
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <script src="gl-matrix-min.js"></script>
+        <script src="geometry/tree.stl"></script>
+        <script src="geometry.js"></script>
+        <script src="tools.js"></script>
+        <script type="text/javascript">
+
+            var vertexTerrainShaderCode =
+                `#version 300 es
+                in vec3 a_position;
+
+                out vec2 v_uv;
+                out vec3 v_lightDirection;
+                out vec3 v_viewDirection;
+                out mat4 v_viewMatrix;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+                uniform vec3 lightDirection;
+
+
+                // Your shader for terrain rendering should take now as an input
+                // matrices for transforming vertices to the light space.
+                // The vertex shader should also do the transformation and pass
+                // the vertex in the light space to the fragment shader.
+                uniform mat4 lightViewMatrix;
+                uniform mat4 lightProjectionMatrix;
+                out vec3 shadowVertex;
+
+                uniform sampler2D heightTexture;
+
+                void main(){
+
+                    v_viewMatrix = viewMatrix;
+                    v_lightDirection = vec3(viewMatrix * vec4(lightDirection, 0.0));
+                    v_uv = a_position.xz + vec2(0.5);
+
+                    float height = 1.0/256.0 * texture(heightTexture, v_uv).g
+                                  + texture(heightTexture, v_uv).b;
+
+                    vec3 new_position = a_position;
+                    new_position.y = new_position.y + height;
+                    v_viewDirection  = -vec3(viewMatrix * modelMatrix * vec4(new_position,1.0));
+
+                    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(new_position,1.0);
+
+                    // Project current vertex to the light view space
+                    shadowVertex = vec3(lightProjectionMatrix * lightViewMatrix * modelMatrix * vec4(new_position,1.0));
+                }`;
+
+            var fragmentTerrainShaderCode =
+                    `#version 300 es
+                    precision highp float;
+
+                    in vec2 v_uv ;
+                    in vec3 v_lightDirection;
+
+                    in vec3 v_viewDirection;
+                    in mat4 v_viewMatrix;
+
+                    // The vertex in the light space passed from the vertex shader
+                    in vec3 shadowVertex;
+
+                    uniform sampler2D heightTexture;
+                    uniform sampler2D grassTexture;
+                    uniform sampler2D sandTexture;
+                    uniform sampler2D stoneTexture;
+                    uniform sampler2D waterNormalTexture;
+                    uniform samplerCube cubeTexture;
+
+                    // Input texture with shadow map
+                    uniform sampler2D shadowTexture;
+
+                    uniform mat4 modelMatrix;
+                    uniform mat4 viewMatrix;
+
+                    uniform bool normalMapping;
+
+                    const float gamma = 1.8;
+                    out vec4 out_color;
+
+                    vec3 compute_normal(){
+                        vec2 step = vec2(1.0)/vec2(textureSize(heightTexture,0));
+                        float m = 1.0/256.0;
+
+                        float delta_x = m * texture(heightTexture, v_uv + vec2(step.x,0.0)).g
+                                      + texture(heightTexture, v_uv + vec2(step.x,0.0)).b
+                                      - m * texture(heightTexture, v_uv - vec2(step.x,0.0)).g
+                                      - texture(heightTexture, v_uv - vec2(step.x,0.0)).b;
+
+
+                        float delta_z = m * texture(heightTexture, v_uv + vec2(0.0,step.y)).g
+                                      + texture(heightTexture, v_uv + vec2(0.0,step.y)).b
+                                      - m * texture(heightTexture, v_uv - vec2(0.0,step.y)).g
+                                      - texture(heightTexture, v_uv - vec2(0.0,step.y)).b;
+
+                        vec3 T = normalize(vec3(2.0*step.x, delta_x, 0.0));
+                        vec3 B = -normalize(vec3(0.0, delta_z, 2.0*step.y)); //minus makes the B vector pointing negative z
+                        vec3 N = normalize(cross(T,B));
+
+                        return N;
+                    }
+
+                    void main(){
+
+                        float shadowing = 0.0;
+
+                        // Here you have to put shadow computation
+                        // shadowing == 0.0 no shadow
+                        // shadowing == 1.0 full shadow
+                        // Please not that the light computation is already modified for you.
+                        if (texture(shadowTexture, (shadowVertex.xy + 1.0)/2.0).z < (shadowVertex.z + 1.0)/2.0 - 0.0007){
+                          shadowing = 1.0;
+                        }
+
+
+                        float height = 1.0/256.0 * texture(heightTexture, v_uv).r
+                                      + texture(heightTexture, v_uv).r;
+
+                        vec3 N = compute_normal();
+
+                        vec3 reflectedColor = vec3(0.0);
+                        vec3 V = normalize(v_viewDirection);
+
+                        mat4 normalMatrix = transpose(inverse(modelMatrix));
+                        N = normalize(vec3(viewMatrix*normalMatrix*vec4(N,0.0)));
+
+                        if(height < 0.034){
+                            N = vec3(0.0,1.0,0.0);
+                            vec3 B = vec3(0.0,0.0,-1.0);
+                            vec3 T = vec3(1.0,0.0,0.0);
+
+                            mat3 TBN = mat3(T,B,N);
+
+                            if(normalMapping){
+                                N = 2.0*texture(waterNormalTexture, 5.0*vec2(v_uv.x,v_uv.y)).rgb - vec3(1.0);
+                                N = TBN * N;
+                            }
+                            N = normalize(vec3(viewMatrix*vec4(N,0.0)));
+                            vec3 R = vec3(inverse(v_viewMatrix) * vec4(normalize(reflect(-V,N)),0.0));
+                            reflectedColor = pow(texture(cubeTexture, R).rgb, vec3(gamma));
+                        }
+
+                        vec3 color = vec3(64.0, 164.0, 223.0) / vec3(255.0);
+                        color = (1.0 - smoothstep(0.033,0.034,height)) * color;
+
+                        color = color + smoothstep(0.033,0.034,height) * pow(texture(sandTexture, vec2(10.0) * v_uv).rgb, vec3(gamma));
+                        color = (1.0 - smoothstep(0.05,0.09,height)) * color;
+
+                        color = color + smoothstep(0.05,0.09,height) * pow(texture(grassTexture, vec2(10.0) * v_uv).rgb, vec3(gamma));
+                        color = (1.0 - smoothstep(0.15,0.3,height)) * color;
+
+                        color = color + smoothstep(0.15,0.3,height) * pow(texture(stoneTexture, vec2(10.0) * v_uv).rgb, vec3(gamma));
+                        color = (1.0 - smoothstep(0.7,0.75,height)) * color;
+
+                        color = color + smoothstep(0.7,0.75,height) * vec3(1.0, 1.0, 1.0);
+
+                        float NdotL = max(dot(normalize(v_lightDirection),N),0.0);
+
+                        color = ((1.0-shadowing)*0.9*vec3(NdotL) + vec3(0.1)) * color;
+                        if(height < 0.034){
+                            color = 0.2 * color + 0.9 * reflectedColor;
+                        }
+                        color = pow(color,vec3(1.0/gamma));
+                        out_color = vec4(color, 1.0);
+                    }`;
+
+            var vertexShaderCode =
+                `#version 300 es
+                in vec3 a_position;
+                in vec3 a_color;
+                in vec3 a_normal;
+
+                out vec3 v_color;
+                out vec3 v_normal;
+                out vec3 v_lightDirection;
+                out vec3 v_viewDirection;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+                uniform vec3 lightDirection;
+
+                void main(){
+                    v_color = a_color;
+                    v_normal = vec3(viewMatrix * modelMatrix * vec4(a_normal,0.0));
+                    v_lightDirection = vec3(viewMatrix * vec4(lightDirection, 0.0));
+                    v_viewDirection  = -vec3(viewMatrix * modelMatrix * vec4(a_position,1.0)); // in the eye space the camera is in (0,0,0)!
+                    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(a_position,1.0);
+                }`;
+
+            var fragmentShaderCode =
+                `#version 300 es
+                precision highp float;
+
+                in vec3 v_color;
+                in vec3 v_viewDirection;
+                in vec3 v_normal;
+                in vec3 v_lightDirection;
+
+                const vec3 lightColor = vec3(1.0,1.0,1.0);
+                const float ambientCoeff = 0.05;
+                const float diffuseCoeff = 0.5;
+                const float specularCoeff = 0.5;
+                const float shininessCoeff = 50.0;
+
+                const float gamma = 1.8;
+
+                out vec4 out_color;
+                void main(){
+
+                    vec3 V = normalize(v_viewDirection);
+                    vec3 N = normalize(v_normal);
+                    vec3 L = normalize(v_lightDirection.xyz);
+                    vec3 R = normalize(reflect(-L,N));
+
+                    vec3 ambient = ambientCoeff * v_color;
+                    vec3 diffuse = vec3(diffuseCoeff) * lightColor * v_color * vec3(max(dot(N,L), 0.0));
+                    vec3 specular = vec3(specularCoeff) * vec3(pow(max(dot(R,V), 0.0), shininessCoeff));
+
+                    vec3 color = ambient + diffuse + specular;
+                    color = pow(color,vec3(1.0/gamma));
+                    out_color = vec4(color, 1.0);
+                }`;
+
+            var vertexCubeShaderCode =
+                `#version 300 es
+                in vec3 a_position;
+
+                out vec3 v_position;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+
+                void main(){
+                    mat4 vM = mat4(mat3(viewMatrix));
+                    v_position  = vec3(vec4(a_position,1.0));
+                    gl_Position = projectionMatrix * vM * modelMatrix * vec4(a_position,1.0);
+                }`;
+
+            var fragmentCubeShaderCode =
+                `#version 300 es
+                precision highp float;
+
+                in vec3 v_position;
+                out vec4 out_color;
+
+                uniform samplerCube cubeTexture;
+
+                void main(){
+                    out_color = texture(cubeTexture, normalize(v_position));
+                }`;
+
+
+            // -------------------
+            // Shadow map shaders
+            // -------------------
+
+                var vertexShadowMapShader =
+                `#version 300 es
+                in vec3 a_position;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+                uniform sampler2D heightTexture;
+                out vec3 shadowVertexPos;
+
+                void main(){
+                    // Fill in missing code
+                    //using some of the code from the vertexTerrainShaderCode
+                    vec2 v_uv = a_position.xz + vec2(0.5);
+
+                    float height = 1.0/256.0 * texture(heightTexture, v_uv).g
+                                  + texture(heightTexture, v_uv).b;
+
+                    vec3 new_position = a_position;
+                    new_position.y = new_position.y + height;
+                    gl_Position = projectionMatrix * viewMatrix *  modelMatrix * vec4(new_position,1.0);
+
+                    shadowVertexPos = gl_Position.xyz / gl_Position.w;
+                }`;
+
+            var fragmentShadowMapShader =
+                `#version 300 es
+                precision highp float;
+
+                out vec4 out_color;
+
+                in vec3 shadowVertexPos;
+
+                void main(){
+                    out_color = vec4(vec3((shadowVertexPos.z + 1.0)/2.0), 1.0);
+                }`;
+
+            var gl; // WebGL context
+            var shaderProgram; // the GLSL program we will use for rendering
+            var cube_vao; // the vertex array object for the cube
+            var sphere_vao; // the vertex array object for the sphere
+            var plane_vao; // the vertex array object for the plane
+            var tree_vao;
+            var tree_shadowMap_vao;
+            var terrain_shadowMap_vao;
+
+            var terrain_vao;
+            var terrainShaderProgram;
+            var cubeShaderProgram;
+            var shadowMapProgram;
+
+            //textures for terrain
+            var textureLocation;
+
+            // off-screen rendering variables
+            var shadowTexture;
+            var depthTexture;
+            var frameBuffer;
+
+            var lightViewMatrix;
+            var lightProjectionMatrix;
+
+            var lightDirection;
+
+
+            function createGLSLProgram(program, vertCode, fragCode){
+                let vertexShader = gl.createShader(gl.VERTEX_SHADER);
+                compileShader(vertexShader, vertCode, gl.VERTEX_SHADER, "Vertex shader");
+                // Creating fragment shader
+                let fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+                compileShader(fragmentShader, fragCode, gl.VERTEX_SHADER, "Fragment shader");
+                // Creating and linking the program
+                linkProgram(program, vertexShader, fragmentShader);
+            }
+
+            function createGLSLPrograms(){
+                shaderProgram = gl.createProgram();
+                createGLSLProgram(shaderProgram, vertexShaderCode, fragmentShaderCode);
+                terrainShaderProgram = gl.createProgram();
+                createGLSLProgram(terrainShaderProgram, vertexTerrainShaderCode, fragmentTerrainShaderCode);
+                cubeShaderProgram = gl.createProgram();
+                createGLSLProgram(cubeShaderProgram, vertexCubeShaderCode, fragmentCubeShaderCode);
+                shadowMapProgram = gl.createProgram();
+                createGLSLProgram(shadowMapProgram, vertexShadowMapShader, fragmentShadowMapShader);
+            }
+
+            function createVAO(vao, shader, vertices, normals, colors){
+
+                // bind VAO
+                gl.bindVertexArray(vao);
+
+                // a buffer for vertices
+                let vertexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+                // position attributes
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                let positionAttributeLocation = gl.getAttribLocation(shader, "a_position");
+                gl.enableVertexAttribArray(positionAttributeLocation);
+                gl.vertexAttribPointer(positionAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+                if(colors.length>0){
+                    // a buffer for color
+                    let colorBuffer = gl.createBuffer();
+                    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+                    // color attributes
+                    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                    let colorAttributeLocation = gl.getAttribLocation(shader, "a_color");
+                    gl.enableVertexAttribArray(colorAttributeLocation);
+                    gl.vertexAttribPointer(colorAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+                }
+
+                if(normals.length>0){
+                    // a buffer for normals
+                    let normalBuffer = gl.createBuffer();
+                    gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+                    // normal attributes
+                    gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                    let normalAttributeLocation = gl.getAttribLocation(shader, "a_normal");
+                    gl.enableVertexAttribArray(normalAttributeLocation);
+                    gl.vertexAttribPointer(normalAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+                }
+            }
+
+            function initBuffers(){
+                sphere_vao = gl.createVertexArray();
+                createVAO(sphere_vao, shaderProgram, sphere_vertices, sphere_vertices, sphere_colors);
+                plane_vao = gl.createVertexArray();
+                createVAO(plane_vao, shaderProgram, plane_vertices, plane_normals, plane_colors);
+                terrain_vao = gl.createVertexArray();
+                createVAO(terrain_vao, terrainShaderProgram, terrain_vertices, [], []);
+                cube_vao = gl.createVertexArray();
+                createVAO(cube_vao, cubeShaderProgram, cube_vertices, [], []);
+                tree_vao = gl.createVertexArray();
+                createVAO(tree_vao, shaderProgram, tree_vertices, tree_normals, tree_colors);
+
+                // These are VAOs you can use for rendering the shadow map.
+                // Please remember that definition of VAO requires knowladge of the shader.
+                // Since shadow map is rendered using different shaders, for the simplicity,
+                // You can have a different VAO.
+                tree_shadowMap_vao = gl.createVertexArray();
+                createVAO(tree_shadowMap_vao, shadowMapProgram, tree_vertices, [], []);
+                terrain_shadowMap_vao = gl.createVertexArray();
+                createVAO(terrain_shadowMap_vao, shadowMapProgram, terrain_vertices, [], []);
+            }
+
+            function drawShadowMap(){
+                let light_azimuthal_angle = document.getElementById("light_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let light_polar_angle = document.getElementById("light_polar_angle").value / 360 * 2 * Math.PI;
+
+                // computing the light direction from the angles
+                let light_x = Math.sin(light_polar_angle) * Math.cos(light_azimuthal_angle);
+                let light_y = Math.cos(light_polar_angle);
+                let light_z = -Math.sin(light_polar_angle) * Math.sin(light_azimuthal_angle);
+                lightDirection = vec3.fromValues(light_x, light_y, light_z);
+
+                // Compute light position for later view matrix computation
+                let lightPosition = vec3.fromValues(10 * light_x, 10 * light_y, 10 * light_z);
+                // let lightPosition = vec3.fromValues(0, 0, 0);
+
+                // Compute view matrix for the shadow map computation
+                let viewMatrix = mat4.create();
+                mat4.lookAt(viewMatrix, lightPosition, vec3.fromValues(0,0,0), vec3.fromValues(0,1,0));
+
+                // Compute projection matrix for the shadow map computation
+                let projectionMatrix = mat4.create();
+                mat4.ortho(projectionMatrix, -10.0, 10.0, -10.0, 10.0, 0.1, 50.0);
+
+                gl.viewport(0, 0, 4096, 4096);
+                gl.clearColor(1.0, 1.0, 1.0, 1.0); // this is important since you want the initial depth in the shadow map to be 1.0
+                gl.disable(gl.CULL_FACE);
+                gl.enable(gl.DEPTH_TEST);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                // enable the GLSL program for the rendering
+                gl.useProgram(shadowMapProgram);
+
+                // getting the locations of uniforms
+                let modelMatrixLocation = gl.getUniformLocation(shadowMapProgram,"modelMatrix");
+                let viewMatrixLocation = gl.getUniformLocation(shadowMapProgram,"viewMatrix");
+                let projectionMatrixLocation = gl.getUniformLocation(shadowMapProgram,"projectionMatrix");
+
+                // setting the uniforms which are common for the entires scene
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+
+                let modelMatrix = mat4.create();
+
+                //drawing the tree correctly
+                gl.bindVertexArray(tree_shadowMap_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.1, 0.12, 4));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.13,0.13,0.13));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree correctly
+                gl.bindVertexArray(tree_shadowMap_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.4, 0.12, 2.5));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.17,0.17,0.17));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree correctly
+                gl.bindVertexArray(tree_shadowMap_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.8, 0.12, 3.3));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.13,0.13,0.13));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree correctly
+                gl.bindVertexArray(tree_shadowMap_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.6, 0.08, 4.7));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.15,0.15,0.15));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the terrain correctly
+                gl.bindVertexArray(terrain_shadowMap_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(0,0,0));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(20,3,20));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, terrain_vertices.length/3);
+                gl.enable(gl.CULL_FACE);
+
+                // save the matrices for the final render pass
+                lightProjectionMatrix = mat4.clone(projectionMatrix);
+                lightViewMatrix = mat4.clone(viewMatrix);
+
+            }
+            function draw(){
+                let camera_azimuthal_angle = document.getElementById("camera_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let camera_polar_angle = document.getElementById("camera_polar_angle").value / 360 * 2 * Math.PI;
+                let camera_distance = document.getElementById("camera_distance").value / 10;
+                let camera_fov = document.getElementById("camera_fov").value / 360 * 2 * Math.PI;
+
+                // computing the camera position from the angles
+                let camera_x = camera_distance * Math.sin(camera_polar_angle) * Math.cos(camera_azimuthal_angle);
+                let camera_y = camera_distance * Math.cos(camera_polar_angle);
+                let camera_z = -camera_distance * Math.sin(camera_polar_angle) * Math.sin(camera_azimuthal_angle);
+                let camera_position = vec3.fromValues(camera_x, camera_y, camera_z);
+
+
+                // view matrix
+                let viewMatrix = mat4.create();
+                mat4.lookAt(viewMatrix, camera_position, vec3.fromValues(0,0,0), vec3.fromValues(0,1,0));
+                // projection matrix
+                let projectionMatrix = mat4.create();
+                mat4.perspective(projectionMatrix, camera_fov, 1260/720, 0.1, 200.0);
+
+                // model matrix (only definition, the value will be set when drawing a specific object)
+                let modelMatrix = mat4.create();
+
+                // set the size of our rendering area
+                gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+
+                // setting the background color and clearing the color buffer
+                gl.clearColor(0.2, 0.2, 0.2, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                gl.enable(gl.CULL_FACE);
+                gl.enable(gl.DEPTH_TEST);
+
+                // enable the GLSL program for the rendering
+                gl.useProgram(shaderProgram);
+
+                // getting the locations of uniforms
+                let modelMatrixLocation = gl.getUniformLocation(shaderProgram,"modelMatrix");
+                let viewMatrixLocation = gl.getUniformLocation(shaderProgram,"viewMatrix");
+                let projectionMatrixLocation = gl.getUniformLocation(shaderProgram,"projectionMatrix");
+                let lightDirectionLocation = gl.getUniformLocation(shaderProgram,"lightDirection");
+
+                // setting the uniforms which are common for the entires scene
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+                gl.uniform3fv(lightDirectionLocation, lightDirection);
+
+                //drawing the tree
+                gl.bindVertexArray(tree_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.1, 0.12, 4));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.13,0.13,0.13));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree
+                gl.bindVertexArray(tree_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.4, 0.12, 2.5));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.17,0.17,0.17));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree
+                gl.bindVertexArray(tree_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.8, 0.12, 3.3));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.13,0.13,0.13));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the tree
+                gl.bindVertexArray(tree_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(-1.6, 0.08, 4.7));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.15,0.15,0.15));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, tree_vertices.length/3);
+
+                //drawing the terrain
+                gl.useProgram(terrainShaderProgram);
+
+                modelMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"modelMatrix");
+                viewMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"viewMatrix");
+                projectionMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"projectionMatrix");
+                lightDirectionLocation = gl.getUniformLocation(terrainShaderProgram,"lightDirection");
+                let lightProjectionMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"lightProjectionMatrix");
+                let lightViewMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"lightViewMatrix");
+
+                for (let i = 0; i < terrainTextures.length; i++){
+                    let textureLocation = gl.getUniformLocation(terrainShaderProgram, terrainTextures[i].uniformName);
+                    gl.activeTexture(gl.TEXTURE0 + i);
+                    gl.bindTexture(gl.TEXTURE_2D, terrainTextures[i].glTexture);
+                    gl.uniform1i(textureLocation, i);
+                }
+
+                textureLocation = gl.getUniformLocation(terrainShaderProgram, "cubeTexture");
+                gl.activeTexture(gl.TEXTURE0+6);
+                gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture);
+                gl.uniform1i(textureLocation, 6);
+
+                // Attaching shadow map
+                textureLocation = gl.getUniformLocation(terrainShaderProgram, "shadowTexture");
+                gl.activeTexture(gl.TEXTURE0+7);
+                gl.bindTexture(gl.TEXTURE_2D, shadowTexture);
+                gl.uniform1i(textureLocation, 7);
+
+                gl.uniform1i(gl.getUniformLocation(terrainShaderProgram,"normalMapping"), document.getElementById("normalMapping").checked);
+
+                gl.uniform3fv(lightDirectionLocation, lightDirection);
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(0.0, 0.0, 0.0));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(20,3,20));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+
+                // Passing the light matrices
+                gl.uniformMatrix4fv(lightProjectionMatrixLocation, false, lightProjectionMatrix);
+                gl.uniformMatrix4fv(lightViewMatrixLocation, false, lightViewMatrix);
+
+                gl.bindVertexArray(terrain_vao);
+                gl.drawArrays(gl.TRIANGLES, 0, terrain_vertices.length/3);
+
+
+                // drawing the sky
+                gl.useProgram(cubeShaderProgram);
+                modelMatrixLocation = gl.getUniformLocation(cubeShaderProgram,"modelMatrix");
+                viewMatrixLocation = gl.getUniformLocation(cubeShaderProgram,"viewMatrix");
+                projectionMatrixLocation = gl.getUniformLocation(cubeShaderProgram,"projectionMatrix");
+                textureLocation = gl.getUniformLocation(cubeShaderProgram, "cubeTexture");
+
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture);
+                gl.uniform1i(textureLocation, 0);
+
+                gl.bindVertexArray(cube_vao);
+                mat4.fromScaling(modelMatrix, vec3.fromValues(100,100,100));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+                gl.cullFace(gl.FRONT);
+                gl.drawArrays(gl.TRIANGLES, 0, cube_vertices.length/3);
+                gl.cullFace(gl.BACK);
+            }
+
+            function createTextures(){
+                for(let i = 0; i < terrainTextures.length; i++){
+                    terrainTextures[i].glTexture = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_2D, terrainTextures[i].glTexture);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                    if(i == 0){
+                        // heightTexture
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    }
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, terrainTextures[i]);
+                    gl.generateMipmap(gl.TEXTURE_2D);
+                }
+
+                cubeTexture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_CUBE_MAP, cubeTexture);
+                gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[4]);
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_NEGATIVE_X, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[5]);
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_Y, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[0]);
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[1]);
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_Z, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[3]);
+                gl.texImage2D(gl.TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, skyImages[2]);
+
+                gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+            }
+
+            function create_FBO(){
+                // create texture for rendering
+                shadowTexture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, shadowTexture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 4096, 4096, 0, gl.RGBA, gl.HALF_FLOAT, null);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+                // create a depth texture
+                depthTexture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, depthTexture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT32F, 4096, 4096, 0, gl.DEPTH_COMPONENT, gl.FLOAT, null);
+
+                // creating frame buffer object
+                frameBuffer = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, shadowTexture, 0);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTexture, 0);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            }
+
+            function draw_all(){
+                gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+                drawShadowMap();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                draw();
+                window.requestAnimationFrame(function() {draw_all();});
+            }
+
+            function start(){
+                initWebGL();
+                createGLSLPrograms();
+                createTextures(); // creating textures on GPU
+                initBuffers();
+
+                create_FBO(); // creating FBO for shadow map
+                draw_all();
+            }
+
+            var leftToRead;
+            var terrainTextures = [];
+            var textureFiles = ["textures/my_compressed.png", "textures/ground_grass.jpg", "textures/sand2.jpg", "textures/rock.jpg",
+                                "textures/waterNormals.jpg"];
+            var textureVariables = ["heightTexture", "grassTexture", "sandTexture", "stoneTexture", "waterNormalTexture"];
+
+            var skyFiles = ["textures/skybox/cloudtop_up.jpg", "textures/skybox/cloudtop_dn.jpg", "textures/skybox/cloudtop_lf.jpg", "textures/skybox/cloudtop_rt.jpg", "textures/skybox/cloudtop_ft.jpg", "textures/skybox/cloudtop_bk.jpg"];
+            var skyImages = [];
+
+            var cubeTexture;
+
+            function count_down(){
+                leftToRead = leftToRead - 1;
+                if (leftToRead == 0){
+                    start();
+                }
+            }
+
+            function main(){
+
+                // loading the textures for terrain
+                leftToRead = textureFiles.length;
+                for(let i = 0; i < textureFiles.length; i++){
+                    terrainTextures.push(new Image());
+                    terrainTextures[i].src = textureFiles[i];
+                    terrainTextures[i].onload = count_down;
+                    terrainTextures[i].uniformName = textureVariables[i];
+                }
+                //loading the textures for skybox
+                leftToRead = leftToRead + 6;
+                for(let i = 0; i < 6; i++){
+                    skyImages.push(new Image());
+                    skyImages[i].src = skyFiles[i];
+                    skyImages[i].onload = count_down;
+                }
+            }
+
+        </script>
+    </head>
+
+    <body onload="main();">
+        <canvas id="webgl-canvas" width="1280" height="720"></canvas>
+        <div  style="float: right">
+                <h4>Camera:</h4>
+                <div class="slidecontainer">
+                    Azimuthal angle:</br><input type="range" min="-270" max="90" value="-110" id="camera_azimuthal_angle" onchange="redenerer_settings()">
+                </div>
+                <div class="slidecontainer">
+                    Polar angle:</br><input type="range" min="1" max="179" value="85" id="camera_polar_angle" onclick="redenerer_settings()">
+                </div>
+                <div class="slidecontainer">
+                    Distance:</br><input type="range" min="20" max="200" value="70" id="camera_distance" onclick="redenerer_settings()">
+                </div>
+                <div class="slidecontainer">
+                    Field of view:</br><input type="range" min="10" max="150" value="55" id="camera_fov" onclick="redenerer_settings()">
+                </div>
+
+                <h4>Light:</h4>
+                <div class="slidecontainer">
+                    Azimuthal angle:</br><input type="range" min="-270" max="90" value="0" id="light_azimuthal_angle" onclick="redenerer_settings()">
+                </div>
+                <div class="slidecontainer">
+                    Polar angle:</br><input type="range" min="1" max="90" value="30" id="light_polar_angle" onclick="redenerer_settings()">
+                </div>
+                <h4>Others:</h4>
+                <div class="slidecontainer">
+                    <input type="checkbox" id="normalMapping"> Normal mapping
+                </div>
+                <div class="slidecontainer">
+                    Bias:</br><input type="range" min="0" max="50" value="0" id="bias">
+                </div>
+                <div class="slidecontainer">
+                    Radius:</br><input type="range" min="0" max="15" value="0" id="radius">
+                </div>
+        </div>
+    </body>
+
+</html>

@@ -1,0 +1,307 @@
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <script src="gl-matrix-min.js"></script>
+        <script src="geometry.js"></script>
+        <script type="text/javascript">
+
+            var vertexShaderCode =
+                `#version 300 es
+                in vec3 a_position;
+                in vec3 a_color;
+                in vec3 a_normal;
+
+                out vec3 v_color;
+                out vec3 v_normal;
+                out vec3 v_lightDirection;
+                out vec3 v_viewDirection;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+                uniform vec3 lightDirection;
+
+                void main(){
+                    v_color = a_color;
+                    v_normal = vec3(viewMatrix * modelMatrix * vec4(a_normal, 0.0));
+                    v_lightDirection = vec3(viewMatrix * vec4(lightDirection, 0.0));
+                    gl_Position =  projectionMatrix * viewMatrix * modelMatrix * vec4(a_position,1.0);
+                    v_viewDirection = -vec3(viewMatrix * modelMatrix * vec4(a_position, 1.0));
+                }`;
+
+            var fragmentShaderCode =
+                `#version 300 es
+                precision mediump float;
+
+                in vec3 v_color;
+                in vec3 v_normal;
+                in vec3 v_lightDirection;
+                in vec3 v_viewDirection;
+
+                const vec3 lightColor = vec3(1.0, 1.0, 1.0);
+                const float ambientCoeff = 0.05;
+                const float diffuseCoeff = 0.5;
+                const float specularCoeff = 0.5;
+                const float shininessCoeff = 50.0;
+                const float gamma = 2.2;
+
+                out vec4 out_color;
+                void main(){
+
+                    vec3 N = normalize(v_normal);
+                    vec3 L = normalize(v_lightDirection);
+                    vec3 R = reflect(-L, N);
+                    vec3 V = normalize(v_viewDirection);
+
+                    vec3 ambient = lightColor * ambientCoeff;
+                    float diffuse = diffuseCoeff * max(dot(N, L), 0.0);
+                    float specular = specularCoeff * pow(max(dot(R, V), 0.0), shininessCoeff);
+
+                    vec3 color = (ambient + diffuse + specular) * v_color;
+
+                    for (int i = 0; i < 3; i++)
+                        color[i] = pow(color[i], 1.0/gamma);
+
+                    out_color = vec4(clamp(color, 0.0, 1.0), 1.0);
+                }`;
+
+
+            var gl; // WebGL context
+            var shaderProgram; // the GLSL program we will use for rendering
+            var cube_vao; // the vertex array object for the cube
+            var plane_vao;
+            var sphere_vao;
+
+            // The function initilize the WebGL canvas
+            function initWebGL(){
+                var canvas = document.getElementById("webgl-canvas");
+                gl = canvas.getContext("webgl2");
+
+                //keep the size of the canvas for leter rendering
+                gl.viewportWidth = canvas.width;
+                gl.viewportHeight = canvas.height;
+
+                //check for errors
+                if(gl){
+                    console.log("WebGL succesfully initialized.");
+                }else{
+                    console.log("Failed to initialize WebGL.")
+                }
+            }
+
+            // This function compiles a shader
+            function compileShader(shader, source, type, name = ""){
+                // link the source of the shader to the shader object
+                gl.shaderSource(shader,source);
+                // compile the shader
+                gl.compileShader(shader);
+                // check for success and errors
+                let success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+                if(success){
+                    console.log(name + " shader compiled succesfully.");
+                }else{
+                    console.log(name + " vertex shader error.")
+                    console.log(gl.getShaderInfoLog(shader));
+                }
+            }
+
+            // This function links the GLSL program by combining different shaders
+            function linkProgram(program,vertShader,fragShader){
+                // attach vertex shader to the program
+                gl.attachShader(program,vertShader);
+                // attach fragment shader to the program
+                gl.attachShader(program,fragShader);
+                // link the program
+                gl.linkProgram(program);
+                // check for success and errors
+                if (gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                    console.log("The shaders are initialized.");
+                }else{
+                    console.log("Could not initialize shaders.");
+                }
+            }
+
+            function createGLSLPrograms(){
+                var vertexShader = gl.createShader(gl.VERTEX_SHADER);
+                compileShader(vertexShader, vertexShaderCode, gl.VERTEX_SHADER, "Vertex shader");
+                // Creating fragment shader
+                var fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+                compileShader(fragmentShader, fragmentShaderCode, gl.VERTEX_SHADER, "Fragment shader");
+                // Creating and linking the program
+                shaderProgram = gl.createProgram();
+                linkProgram(shaderProgram, vertexShader, fragmentShader);
+            }
+
+            function createVAO(vao, shader, vertices, normals, colors){
+                // a buffer for positions
+                var vertexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+                // a buffer for colors
+                var colorBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+
+                // a buffer for normals
+                var normalBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+
+                gl.bindVertexArray(vao);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                var positionAttributeLocation = gl.getAttribLocation(shader, "a_position");
+                gl.enableVertexAttribArray(positionAttributeLocation);
+                gl.vertexAttribPointer(positionAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                var colorAttributeLocation = gl.getAttribLocation(shader, "a_color");
+                gl.enableVertexAttribArray(colorAttributeLocation);
+                gl.vertexAttribPointer(colorAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                var normalAttributeLocation = gl.getAttribLocation(shader, "a_normal");
+                gl.enableVertexAttribArray(normalAttributeLocation);
+                gl.vertexAttribPointer(normalAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+            }
+
+            function initBuffers(){
+                cube_vao = gl.createVertexArray();
+                createVAO(cube_vao, shaderProgram, cube_vertices, cube_normals, cube_colors);
+                sphere_vao = gl.createVertexArray();
+                createVAO(sphere_vao, shaderProgram, sphere_vertices, sphere_vertices, sphere_colors);
+                plane_vao = gl.createVertexArray();
+                createVAO(plane_vao, shaderProgram, plane_vertices, plane_normals, plane_colors);
+            }
+
+            function draw(){
+                // input variables for controling camera and light parameters
+                // feel free to use these or create your own
+                let camera_azimuthal_angle = document.getElementById("camera_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let camera_polar_angle = document.getElementById("camera_polar_angle").value / 360 * 2 * Math.PI;
+                let camera_distance = document.getElementById("camera_distance").value / 10;
+                let camera_fov = document.getElementById("camera_fov").value / 360 * 2 * Math.PI;
+                let light_azimuthal_angle = document.getElementById("light_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let light_polar_angle = document.getElementById("light_polar_angle").value / 360 * 2 * Math.PI;
+
+                // Exercise 1:
+                // add computation of camera position
+                let camera_x = camera_distance * Math.sin(camera_azimuthal_angle) * Math.sin(camera_polar_angle);
+                let camera_y = camera_distance * Math.cos(camera_polar_angle);
+                let camera_z = camera_distance * Math.cos(camera_azimuthal_angle) * Math.sin(camera_polar_angle);
+                let camera_position = vec3.fromValues(camera_x, camera_y, camera_z);
+
+                // Excercise 3:
+                // add computation of light direction
+                let light_x = Math.sin(light_azimuthal_angle) * Math.sin(light_polar_angle);
+                let light_y = Math.cos(light_polar_angle);
+                let light_z = Math.cos(light_azimuthal_angle) * Math.sin(light_polar_angle);
+                let lightDirection = vec3.fromValues(light_x, light_y, light_z);
+                let lightDirectionLocation = gl.getUniformLocation(shaderProgram,"lightDirection");
+                gl.uniform3fv(lightDirectionLocation, lightDirection);
+
+                // view matrix
+                var viewMatrix = mat4.create();
+                // mat4.lookAt(viewMatrix, camera_position, vec3.fromValues(0.0, 0.0, 0.0), vec3.fromValue(0.0, 1.0, 0.0));
+                const target = vec3.fromValues(0,0,0);
+                const up = vec3.fromValues(0,1,0);
+                mat4.lookAt(viewMatrix, camera_position, target, up);
+
+                // projection matrix
+                var projectionMatrix = mat4.create();
+                mat4.perspective(projectionMatrix, camera_fov, (gl.viewportWidth / gl.viewportHeight), 1, 50);
+
+                var modelMatrix = mat4.create();
+                let modelMatrixLocation = gl.getUniformLocation(shaderProgram,"modelMatrix");
+
+                gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+                gl.clearColor(0.2, 0.2, 0.2, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                //gl.enable(gl.CULL_FACE);
+                gl.enable(gl.DEPTH_TEST);
+
+                // enable the GLSL program for the rendering
+                gl.useProgram(shaderProgram);
+
+                // Tips for drawing:
+                // - Before drawing anything using the program you still have to set values of all uniforms.
+                // - As long as you use the same shader program you do not need to set all uniforms everytime you draw new object. The programs remembers the uniforms after calling gl.drawArrays
+                // - The same, if you draw the same object, e.g., cube, multiple times, you do not need to bind the corresponding VAO everytime you draw.
+
+                let viewMatrixLocation = gl.getUniformLocation(shaderProgram,"viewMatrix");
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+
+                let projectionMatrixLocation = gl.getUniformLocation(shaderProgram,"projectionMatrix");
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+
+                // drawing the cube
+                gl.bindVertexArray(cube_vao);
+                mat4.fromTranslation(modelMatrix, vec3.fromValues( -2, 0.52, 0));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, cube_vertices.length/3);
+
+                // drawing the second cube
+                mat4.fromTranslation(modelMatrix, vec3.fromValues( 2, 0.52, 0));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, cube_vertices.length/3);
+
+                // drawing the sphere
+                gl.bindVertexArray(sphere_vao);
+                mat4.fromTranslation(modelMatrix, vec3.fromValues( 0, 0.52, 0));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, sphere_vertices.length/3);
+
+                // drawing the plane
+                gl.bindVertexArray(plane_vao);
+                mat4.fromScaling(modelMatrix, vec3.fromValues( 10, 1, 10));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, plane_vertices.length/3);
+
+
+                window.requestAnimationFrame(function() {draw();});
+            }
+
+            function start(){
+                // initialze WebGL
+                initWebGL();
+                // create GLSL programs
+                createGLSLPrograms();
+                // initialize all the buffers and set up the vertex array objects (VAO)
+                initBuffers();
+                // draw
+                draw();
+            }
+
+        </script>
+    </head>
+
+    <body onload="start();">
+        <canvas id="webgl-canvas" width="768" height="768"></canvas>
+        <div  style="float: right">
+            <h4>Camera:</h4>
+            <div class="slidecontainer">
+                Azimuthal angle:</br><input type="range" min="-270" max="90" value="-215" id="camera_azimuthal_angle">
+            </div>
+            <div class="slidecontainer">
+                Polar angle:</br><input type="range" min="1" max="179" value="70" id="camera_polar_angle">
+            </div>
+            <div class="slidecontainer">
+                Distance:</br><input type="range" min="20" max="200" value="140" id="camera_distance">
+            </div>
+            <div class="slidecontainer">
+                Field of view:</br><input type="range" min="10" max="150" value="25" id="camera_fov">
+            </div>
+
+            <h4>Light:</h4>
+            <div class="slidecontainer">
+                Azimuthal angle:</br><input type="range" min="-270" max="90" value="-70" id="light_azimuthal_angle">
+            </div>
+            <div class="slidecontainer">
+                Polar angle:</br><input type="range" min="1" max="90" value="60" id="light_polar_angle">
+            </div>
+        </div>
+    </body>
+
+</html>

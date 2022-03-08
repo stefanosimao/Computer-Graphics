@@ -1,0 +1,502 @@
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <script src="gl-matrix-min.js"></script>
+        <script src="geometry.js"></script>
+        <script src="tools.js"></script>
+        <script type="text/javascript">
+
+            // -------------Shaders for the terrain rendering----------------
+            var vertexTerrainShaderCode =
+                `#version 300 es
+
+                in vec3 a_position;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+
+                //uniforms for the terrain
+                uniform sampler2D terrain;
+
+                uniform vec3 lightDirection;
+
+                out vec2 v_uv;
+                out float displacement;
+                out vec3 v_lightDirection;
+                out vec3 v_viewDirection;
+
+                void main(){
+                  //add a bias to center the terrain
+                  v_uv = vec2(a_position.x + 0.5, a_position.z + 0.5);
+
+                  //adding the highmap
+                  displacement = texture(terrain, v_uv).x;
+
+                  //displace vertices along y-axis
+                  vec4 v_position = vec4(a_position.x, displacement, a_position.z, 1.0);
+                  gl_Position = projectionMatrix * viewMatrix * modelMatrix * v_position;
+                  v_lightDirection = vec3(viewMatrix * vec4(lightDirection, 0.0));
+                  v_viewDirection  = -vec3(viewMatrix * modelMatrix * vec4(a_position,1.0));
+                }
+                `;
+
+            var fragmentTerrainShaderCode =
+                `#version 300 es
+                precision highp float;
+
+                in vec2 v_uv;
+                in float displacement;
+                in vec3 v_lightDirection;
+                in vec3 v_viewDirection;
+
+                //uniforms for the textures
+                uniform sampler2D terrain;
+                uniform sampler2D sand;
+                uniform sampler2D rock;
+                uniform sampler2D soil;
+                uniform sampler2D water;
+                uniform sampler2D snow;
+                uniform sampler2D grass;
+
+                //uniforms for normal, view and model transformations
+                uniform mat4 normalMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 modelMatrix;
+
+                const vec3 lightColor = vec3(1.0, 1.0, 1.0);
+                const float ambientCoeff = 0.05;
+                const float diffuseCoeff = 0.5;
+                const float specularCoeff = 0.5;
+                const float shininessCoeff = 50.0;
+                const float gamma = 1.8;
+
+                out vec4 out_color;
+
+                void main(){
+
+                  //adding texture with the height
+                  float sstep;
+                  vec3 textureColor;
+                  if (displacement <= 0.055) {
+                      textureColor = vec3(texture(water,v_uv));
+                  } else if (displacement <= 0.10) {
+                      sstep = smoothstep(0.055, 0.10, displacement);
+                      textureColor = vec3((1.0 - sstep) * texture(sand,v_uv) + sstep * texture(grass,v_uv));
+                  } else if(displacement <= 0.15) {
+                      sstep = smoothstep(0.10, 0.15, displacement);
+                      textureColor = vec3((1.0 - sstep) * texture(grass,v_uv) + sstep * texture(soil,v_uv));
+                  } else if (displacement <= 0.25) {
+                      sstep = smoothstep(0.2, 0.25, displacement);
+                      textureColor = vec3((1.0 - sstep) * texture(soil,v_uv) + sstep * texture(rock,v_uv));
+                  } else if (displacement <= 0.55) {
+                      sstep = smoothstep(0.25, 0.55, displacement);
+                      textureColor = vec3((1.0 - sstep) * texture(rock,v_uv) + sstep * texture(snow,v_uv));
+                  } else {
+                      textureColor = vec3(1.0,1.0,1.0);
+                  }
+
+                  //computing normals
+                  vec3 v_normal;
+                  if (displacement < 0.055)  {
+                      v_normal = vec3(0.0, 1.0, 0.0);
+                  } else {
+                    //For the normal computation it was difficult to follow from the video the lecture where the prof explained it
+                    //I had in mind a way to do it but couldn't made it work
+                    //I followed what the prof showed in class this week to make it work
+
+                    vec2 step = vec2(1.0)/vec2(textureSize(terrain,0));
+                    float m = 1.0/256.0;
+
+                    float d_x = m * texture(terrain, v_uv + vec2(step.x, 0.0)).g + texture(terrain, v_uv + vec2(step.x, 0.0)).b
+                                - m * texture(terrain, v_uv - vec2(step.x, 0.0)).g - texture(terrain, v_uv - vec2(step.x, 0.0)).g;
+
+                    float d_z = m * texture(terrain, v_uv + vec2(0.0, step.y)).g + texture(terrain, v_uv + vec2(0.0, step.y)).b
+                                - m * texture(terrain, v_uv - vec2(0.0, step.y)).g - texture(terrain, v_uv - vec2(0.0, step.y)).g;
+
+                    vec3 T = normalize(vec3(2.0*step.x, d_x, 0.0));
+                    vec3 B = -normalize(vec3(0.0, d_z, 2.0*step.y));
+                    v_normal = normalize(cross(T,B));
+                  }
+
+                  //rest of the shading
+                  vec3 V = normalize(v_viewDirection);
+                  //scale the terrain as in the tips
+                  vec3 N = normalize(vec3(viewMatrix * normalMatrix * vec4(v_normal,0.0)));
+                  vec3 L = normalize(v_lightDirection.xyz);
+                  vec3 R = normalize(reflect(-L,N));
+
+                  vec3 ambient = ambientCoeff * textureColor;
+                  vec3 diffuse = vec3(diffuseCoeff) * lightColor * textureColor * vec3(max(dot(N,L), 0.0));
+
+                  vec3 color = ambient + diffuse;
+                  color = pow(color,vec3(1.0/gamma));
+                  out_color = vec4(color, 1.0);
+
+               }`;
+
+            var vertexShaderCode =
+                `#version 300 es
+                in vec3 a_position;
+                in vec3 a_color;
+                in vec3 a_normal;
+
+                out vec3 v_color;
+                out vec3 v_normal;
+                out vec3 v_lightDirection;
+                out vec3 v_viewDirection;
+
+                uniform mat4 modelMatrix;
+                uniform mat4 viewMatrix;
+                uniform mat4 projectionMatrix;
+                uniform vec3 lightDirection;
+
+                void main(){
+                    v_color = a_color;
+                    v_normal = vec3(viewMatrix * modelMatrix * vec4(a_normal,0.0));
+                    v_lightDirection = vec3(viewMatrix * vec4(lightDirection, 0.0));
+                    v_viewDirection  = -vec3(viewMatrix * modelMatrix * vec4(a_position,1.0)); // in the eye space the camera is in (0,0,0)!
+                    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(a_position,1.0);
+                }`;
+                
+            var fragmentShaderCode =
+                `#version 300 es
+                precision highp float;
+
+                in vec3 v_color;
+                in vec3 v_viewDirection;
+                in vec3 v_normal;
+                in vec3 v_lightDirection;
+
+                const vec3 lightColor = vec3(1.0,1.0,1.0);
+                const float ambientCoeff = 0.05;
+                const float diffuseCoeff = 0.5;
+                const float specularCoeff = 0.5;
+                const float shininessCoeff = 50.0;
+
+                const float gamma = 1.8;
+
+                out vec4 out_color;
+                void main(){
+
+                    vec3 V = normalize(v_viewDirection);
+                    vec3 N = normalize(v_normal);
+                    vec3 L = normalize(v_lightDirection.xyz);
+                    vec3 R = normalize(reflect(-L,N));
+
+                    vec3 ambient = ambientCoeff * v_color;
+                    vec3 diffuse = vec3(diffuseCoeff) * lightColor * v_color * vec3(max(dot(N,L), 0.0));
+                    vec3 specular = vec3(specularCoeff) * vec3(pow(max(dot(R,V), 0.0), shininessCoeff));
+
+                    vec3 color = ambient + diffuse + specular;
+                    color = pow(color,vec3(1.0/gamma));
+                    out_color = vec4(color, 1.0);
+                }`;
+
+
+            var gl; // WebGL context
+            var shaderProgram; // the GLSL program we will use for rendering
+            //var cube_vao; // the vertex array object for the cube
+            var sphere_vao; // the vertex array object for the sphere
+            //var plane_vao; // the vertex array object for the plane
+
+            var terrain_vao; // the vertex array object for the terrain
+            var terrainShaderProgram; // shader program for rendering the terrain
+
+
+            function createGLSLProgram(program, vertCode, fragCode){
+                let vertexShader = gl.createShader(gl.VERTEX_SHADER);
+                compileShader(vertexShader, vertCode, gl.VERTEX_SHADER, "Vertex shader");
+                // Creating fragment shader
+                let fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+                compileShader(fragmentShader, fragCode, gl.VERTEX_SHADER, "Fragment shader");
+                // Creating and linking the program
+                linkProgram(program, vertexShader, fragmentShader);
+            }
+
+            function createGLSLPrograms(){
+                shaderProgram = gl.createProgram();
+                createGLSLProgram(shaderProgram, vertexShaderCode, fragmentShaderCode);
+
+                //------------- Creating shader program for the terrain rendering ---------------
+                terrainShaderProgram = gl.createProgram();
+                createGLSLProgram(terrainShaderProgram, vertexTerrainShaderCode, fragmentTerrainShaderCode);
+            }
+
+            function createVAO(vao, shader, vertices, normals, colors){
+                // a buffer for vertices
+                let vertexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+                // a buffer for color
+                let colorBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+
+                // a buffer for normals
+                let normalBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+
+                // bind VAO
+                gl.bindVertexArray(vao);
+
+                // position attributes
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                let positionAttributeLocation = gl.getAttribLocation(shader, "a_position");
+                gl.enableVertexAttribArray(positionAttributeLocation);
+                gl.vertexAttribPointer(positionAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+                // color attributes
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                let colorAttributeLocation = gl.getAttribLocation(shader, "a_color");
+                gl.enableVertexAttribArray(colorAttributeLocation);
+                gl.vertexAttribPointer(colorAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+
+                // normal attributes
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                let normalAttributeLocation = gl.getAttribLocation(shader, "a_normal");
+                gl.enableVertexAttribArray(normalAttributeLocation);
+                gl.vertexAttribPointer(normalAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+            }
+
+            function initBuffers(){
+                cube_vao = gl.createVertexArray();
+                createVAO(cube_vao, shaderProgram, cube_vertices, cube_normals, cube_colors);
+                sphere_vao = gl.createVertexArray();
+                createVAO(sphere_vao, shaderProgram, sphere_vertices, sphere_vertices, sphere_colors);
+                plane_vao = gl.createVertexArray();
+                createVAO(plane_vao, shaderProgram, plane_vertices, plane_normals, plane_colors);
+
+                //------------- Creating VBO and VAO for terrain ---------------
+
+                //buffer for the terrain_vaovar normalBuffer = gl.createBuffer();
+                let terrainVertices = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, terrainVertices);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(terrain_vertices), gl.STATIC_DRAW);
+                gl.bindBuffer(gl.ARRAY_BUFFER, terrainVertices);
+
+                // Creating VAO for the terrain
+                terrain_vao = gl.createVertexArray();
+                gl.bindVertexArray(terrain_vao);
+                let positionAttributeLocation = gl.getAttribLocation(terrainShaderProgram, "a_position");
+                gl.enableVertexAttribArray(positionAttributeLocation);
+                gl.vertexAttribPointer(positionAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+            }
+
+            function draw(){
+                let camera_azimuthal_angle = document.getElementById("camera_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let camera_polar_angle = document.getElementById("camera_polar_angle").value / 360 * 2 * Math.PI;
+                let camera_distance = document.getElementById("camera_distance").value / 10;
+                let camera_fov = document.getElementById("camera_fov").value / 360 * 2 * Math.PI;
+                let light_azimuthal_angle = document.getElementById("light_azimuthal_angle").value / 360 * 2 * Math.PI;
+                let light_polar_angle = document.getElementById("light_polar_angle").value / 360 * 2 * Math.PI;
+
+                // computing the camera position from the angles
+                let camera_x = camera_distance * Math.sin(camera_polar_angle) * Math.cos(camera_azimuthal_angle);
+                let camera_y = camera_distance * Math.cos(camera_polar_angle);
+                let camera_z = -camera_distance * Math.sin(camera_polar_angle) * Math.sin(camera_azimuthal_angle);
+                let camera_position = vec3.fromValues(camera_x, camera_y, camera_z);
+
+                // computing the light direction from the angles
+                let light_x = Math.sin(light_polar_angle) * Math.cos(light_azimuthal_angle);
+                let light_y = Math.cos(light_polar_angle);
+                let light_z = -Math.sin(light_polar_angle) * Math.sin(light_azimuthal_angle);
+                let lightDirection = vec3.fromValues(light_x, light_y, light_z);
+
+                // view matrix
+                let viewMatrix = mat4.create();
+                mat4.lookAt(viewMatrix, camera_position, vec3.fromValues(0,0,0), vec3.fromValues(0,1,0));
+                // projection matrix
+                let projectionMatrix = mat4.create();
+                mat4.perspective(projectionMatrix, camera_fov, 1.0, 0.1, 40.0);
+
+                // model matrix (only definition, the value will be set when drawing a specific object)
+                let modelMatrix = mat4.create();
+
+                // set the size of our rendering area
+                gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+
+                // setting the background color and clearing the color buffer
+                gl.clearColor(0.2, 0.2, 0.2, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                gl.enable(gl.CULL_FACE);
+                gl.enable(gl.DEPTH_TEST);
+
+                // enable the GLSL program for the rendering
+                gl.useProgram(shaderProgram);
+
+                // getting the locations of uniforms
+                let modelMatrixLocation = gl.getUniformLocation(shaderProgram,"modelMatrix");
+                let viewMatrixLocation = gl.getUniformLocation(shaderProgram,"viewMatrix");
+                let projectionMatrixLocation = gl.getUniformLocation(shaderProgram,"projectionMatrix");
+                let lightDirectionLocation = gl.getUniformLocation(shaderProgram,"lightDirection");
+
+                // setting the uniforms which are common for the entires scene
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+                gl.uniform3fv(lightDirectionLocation, lightDirection);
+
+                // drawing the two cubes
+                // gl.bindVertexArray(cube_vao);
+                // mat4.fromTranslation(modelMatrix, vec3.fromValues(-1.5, 0.0, 0.0));
+                // gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                // gl.drawArrays(gl.TRIANGLES, 0, cube_vertices.length/3);
+                //
+                // mat4.fromTranslation(modelMatrix, vec3.fromValues(1.5, 0.0, 0.0));
+                // gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                // gl.drawArrays(gl.TRIANGLES, 0, cube_vertices.length/3);
+
+                //drawing the sphere
+                gl.bindVertexArray(sphere_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(0.0, 3.0, 0.0));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, sphere_vertices.length/3);
+
+                //drawing the plane
+                // gl.bindVertexArray(plane_vao);
+                // mat4.fromTranslation(modelMatrix,vec3.fromValues(0.0, -0.5, 0.0));
+                // mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(7,7,7));
+                // gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                // gl.drawArrays(gl.TRIANGLES, 0, plane_vertices.length/3);
+
+                //-----------------------------------------------
+                //---------- Drawing the terrain-----------------
+                //-----------------------------------------------
+
+                // You have to start using the new shader program for terrain rendering.
+                // Remember to pass all the matrices and the illumination information
+                // Remember to get first all the locations of the uniforms in the new GLSL program
+                // and then set up the values their values.
+                // Note that the code for setting up the textures
+                // is already provided below.
+
+                //use terrain shader
+                gl.useProgram(terrainShaderProgram);
+
+                modelMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"modelMatrix");
+                viewMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"viewMatrix");
+                projectionMatrixLocation = gl.getUniformLocation(terrainShaderProgram,"projectionMatrix");
+                lightDirectionLocation = gl.getUniformLocation(terrainShaderProgram,"lightDirection");
+                normalMatrixLocation = gl.getUniformLocation(terrainShaderProgram, 'normalMatrix');
+
+                //define normal matrix
+                var normalMatrix = mat4.create();
+                mat4.invert(normalMatrix, modelMatrix);
+                mat4.transpose(normalMatrix, normalMatrix);
+
+                gl.uniformMatrix4fv(viewMatrixLocation, false, viewMatrix);
+                gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+                gl.uniformMatrix4fv(normalMatrixLocation, false, normalMatrix);
+                gl.uniform3fv(lightDirectionLocation, lightDirection);
+
+                // ------------ Setting up the textures ----------------
+                for (let i = 0; i < terrainTextures.length; i++){
+                   let textureLocation = gl.getUniformLocation(terrainShaderProgram, terrainTextures[i].uniformName);
+                   gl.activeTexture(gl.TEXTURE0 + i);
+                   gl.bindTexture(gl.TEXTURE_2D, terrainTextures[i].glTexture);
+                   gl.uniform1i(textureLocation, i);
+                }
+
+                // ------------ Rendering the terrain ----------------------
+                gl.bindVertexArray(terrain_vao);
+                mat4.fromTranslation(modelMatrix,vec3.fromValues(0.0, -0.5, 0.0));
+                mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(13,7,13));
+                gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+                gl.drawArrays(gl.TRIANGLES, 0, terrain_vertices.length/3);
+
+                window.requestAnimationFrame(function() {draw();});
+            }
+
+            // The function below creates textures and sets default parameters
+            // Feel free to play around with them to see how your rendering changes
+            function createTextures(){
+                for(let i = 0; i < terrainTextures.length; i++){
+                    terrainTextures[i].glTexture = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_2D, terrainTextures[i].glTexture);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE, terrainTextures[i]);
+                    gl.generateMipmap(gl.TEXTURE_2D);
+                }
+            }
+            function start(){
+
+                initWebGL();
+                createGLSLPrograms();
+                createTextures(); // creating textures on GPU
+                initBuffers();
+                draw();
+            }
+
+            var leftToRead; // variable for counting all the textures that were already read from the files
+            var terrainTextures = []; // array for storing all the texture information; it does not need to be changed
+
+            // a list of the paths to the files with textures
+            // add here the paths to the files from which the textures should be read
+            var textureFiles = ['./Locarno.png', './soil.jpg', './rock.jpg', './sand.jpg', './snow.jpg', './water.jpg', './grass.jpg'];
+
+            // textureVariables should contain the names of uniforms in the shader program
+            // IMPORTAN: if you are going to use the code we provide,
+            // make sure the names below are identical to the one you use in the shader program
+            var textureVariables = ['terrain', 'soil', 'rock', 'sand', 'snow', 'water', 'grass'];
+
+            function count_down(){
+                leftToRead = leftToRead - 1;
+                if (leftToRead == 0){
+                    start();
+                }
+            }
+
+            function main(){
+
+                // Loading the textures
+                leftToRead = textureFiles.length;
+                if(leftToRead == 0){
+                    start();
+                }else{
+                    for(let i = 0; i < textureFiles.length; i++){
+                        terrainTextures.push(new Image());
+                        //this line solves an error in the browser
+                        terrainTextures[i].crossOrigin = "anonymous";
+                        terrainTextures[i].src = textureFiles[i];
+                        terrainTextures[i].onload = count_down;
+                        terrainTextures[i].uniformName = textureVariables[i];
+                    }
+                }
+            }
+
+        </script>
+    </head>
+
+    <body onload="main();">
+      <!-- bigger canvas -->
+        <canvas id="webgl-canvas" width="1000" height="1000"></canvas>
+        <div  style="float: right">
+                <h4>Camera:</h4>
+                <div class="slidecontainer">
+                    Azimuthal angle:</br><input type="range" min="-270" max="90" value="-45" id="camera_azimuthal_angle">
+                </div>
+                <div class="slidecontainer">
+                    Polar angle:</br><input type="range" min="1" max="179" value="60" id="camera_polar_angle">
+                </div>
+                <div class="slidecontainer">
+                    Distance:</br><input type="range" min="20" max="200" value="200" id="camera_distance">
+                </div>
+                <div class="slidecontainer">
+                    Field of view:</br><input type="range" min="10" max="150" value="45" id="camera_fov">
+                </div>
+
+                <h4>Light:</h4>
+                <div class="slidecontainer">
+                    Azimuthal angle:</br><input type="range" min="-270" max="90" value="-70" id="light_azimuthal_angle">
+                </div>
+                <div class="slidecontainer">
+                    Polar angle:</br><input type="range" min="1" max="90" value="60" id="light_polar_angle">
+                </div>
+        </div>
+    </body>
+
+</html>
